@@ -3,7 +3,7 @@ Motor GridFS Classes
 
 .. currentmodule:: motor
 
-Store blobs of data in `GridFS <http://docs.mongodb.org/manual/applications/gridfs/>`_.
+Store blobs of data in `GridFS <http://dochub.mongodb.org/core/gridfs>`_.
 
 .. seealso:: :ref:`Differences between PyMongo's and Motor's GridFS APIs
   <gridfs-differences>`.
@@ -17,11 +17,6 @@ Store blobs of data in `GridFS <http://docs.mongodb.org/manual/applications/grid
 .. autoclass:: MotorGridIn
   :members:
 
-  .. autoattribute:: _id
-  .. automethod:: set
-
 
 .. autoclass:: MotorGridOut
   :members:
-
-  .. autoattribute:: _id

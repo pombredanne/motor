@@ -1,4 +1,4 @@
-# Copyright 2013 10gen, Inc.
+# Copyright 2013-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ def read_from_which_host(
       - `tag_sets`: List of dicts of tags for data-center-aware reads
       - `secondary_acceptable_latency_ms`: a float
     """
-    db = rsc.pymongo_test
+    db = rsc.motor_test
     db.read_preference = mode
     if isinstance(tag_sets, dict):
         tag_sets = [tag_sets]

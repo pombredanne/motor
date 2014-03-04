@@ -5,35 +5,17 @@ Differences between Motor and PyMongo
 Major differences
 =================
 
-Creating a connection
+Connecting to MongoDB
 ---------------------
 
-PyMongo's :class:`~pymongo.mongo_client.MongoClient` and
-:class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient` constructors
-block until they have established a connection to MongoDB. A
-:class:`~motor.MotorClient` or :class:`~motor.MotorReplicaSetClient`,
-however, is created unconnected. One should call
-:meth:`~motor.MotorClient.open_sync` at the beginning of a Tornado web
-application, before accepting requests:
+PyMongo's connection classes are called
+:class:`~pymongo.mongo_client.MongoClient` and
+:class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient`.
+Motor provides a
+:class:`~motor.MotorClient` and :class:`~motor.MotorReplicaSetClient`.
 
-.. code-block:: python
-
-    import motor
-    client = motor.MotorClient().open_sync()
-
-To make a connection asynchronously once the application is running, call
-:meth:`~motor.MotorClient.open`:
-
-.. code-block:: python
-
-    def opened(client, error):
-        if error:
-            print 'Error connecting!', error
-        else:
-            # Use the client
-            pass
-
-    motor.MotorClient().open(opened)
+Motor's client classes do no I/O in their constructors; they connect
+on demand, when you first attempt an operation.
 
 Callbacks and Futures
 ---------------------
@@ -62,7 +44,7 @@ But Motor's :meth:`~motor.MotorCollection.find_one` method is asynchronous:
 
 .. code-block:: python
 
-    db = MotorClient().open_sync().test
+    db = MotorClient().test
 
     def got_user(user, error):
         if error:
@@ -90,7 +72,7 @@ To find multiple documents, Motor provides :meth:`~motor.MotorCursor.to_list`:
 .. seealso:: MotorCursor's :meth:`~motor.MotorCursor.fetch_next`
 
 If you pass no callback to an asynchronous method, it returns a Future for use
-in a `coroutine`_:
+in a :func:`coroutine <tornado.gen.coroutine>`:
 
 .. code-block:: python
 
@@ -101,52 +83,7 @@ in a `coroutine`_:
         yield motor_db.collection.insert({'name': 'Randall'})
         doc = yield motor_db.collection.find_one()
 
-.. _coroutine: http://tornadoweb.org/en/stable/gen.html
-
-See :ref:`coroutine-example`.
-
-max_concurrent and max_wait_time
---------------------------------
-
-PyMongo allows the number of connections to MongoDB to grow to match the number
-of threads performing concurrent operations. (PyMongo's ``max_pool_size``
-merely caps the number of *idle* sockets kept open. [#max_pool_size]_)
-:class:`~motor.MotorClient` and :class:`~motor.MotorReplicaSetClient` provide
-an additional option, ``max_concurrent``, which caps the total number of
-sockets per host, per client. The default is 100. Once the cap is reached,
-operations yield to the IOLoop while waiting for a free socket. The optional
-``max_wait_time`` allows operations to raise a :exc:`~motor.MotorPoolTimeout`
-if they can't acquire a socket before the deadline.
-
-Timeouts
---------
-
-In PyMongo, you can set a network timeout which causes an
-:exc:`~pymongo.errors.AutoReconnect` exception if an operation does not complete
-in time::
-
-    db = MongoClient(socketTimeoutMS=500).test
-    try:
-        user = db.users.find_one({'name': 'Jesse'})
-        print user
-    except AutoReconnect:
-        print 'timed out'
-
-:class:`~motor.MotorClient` and :class:`~motor.MotorReplicaSetClient`
-support the same options::
-
-    db = MotorClient(socketTimeoutMS=500).open_sync().test
-
-    @gen.coroutine
-    def f():
-        try:
-            user = yield db.users.find_one({'name': 'Jesse'})
-            print user
-        except AutoReconnect:
-            print 'timed out'
-
-As in PyMongo, the default ``connectTimeoutMS`` is 20 seconds, and the default
-``socketTimeoutMS`` is no timeout.
+See :ref:`the coroutine example <coroutine-example>`.
 
 Requests
 --------
@@ -173,7 +110,7 @@ perform the next operation in the callback::
     db.users.insert({'name': 'Ben', 'maintains': 'Tornado'}, callback=inserted)
 
 This ensures ``find_one`` isn't run until ``insert`` has been acknowledged by
-the server. Obviously, this code is improved by `tornado.gen`_::
+the server. Obviously, this code is improved by :mod:`tornado.gen`::
 
     @gen.coroutine
     def f():
@@ -183,8 +120,6 @@ the server. Obviously, this code is improved by `tornado.gen`_::
 
 Motor ignores the ``auto_start_request`` parameter to
 :class:`~motor.MotorClient` or :class:`~motor.MotorReplicaSetClient`.
-
-.. _tornado.gen: http://tornadoweb.org/en/stable/gen.html
 
 Threading and forking
 ---------------------
@@ -202,30 +137,25 @@ Deprecated classes and options
 ------------------------------
 
 PyMongo deprecated the ``slave_okay`` / ``slaveok`` option in favor of
-`read preferences`_ in version 2.3. It deprecated
+:ref:`read preferences <secondary-reads>` in version 2.3. It deprecated
 :class:`~pymongo.connection.Connection` and
 :class:`~pymongo.replica_set_connection.ReplicaSetConnection` in favor of
 :class:`~pymongo.mongo_client.MongoClient` and
 :class:`~pymongo.mongo_replica_set_client.MongoReplicaSetClient` in version
-2.4, as well as deprecating the ``safe`` option in favor of `write concerns`_.
+2.4, as well as deprecating the ``safe`` option in favor of
+:attr:`~motor.MotorClient.write_concern`.
 Motor supports none of PyMongo's deprecated options and classes at all, and
 will raise :exc:`~pymongo.errors.ConfigurationError` if you use them.
-
-.. _read preferences: http://api.mongodb.org/python/current/examples/high_availability.html#secondary-reads
-
-.. _write concerns: http://api.mongodb.org/python/current/api/pymongo/mongo_client.html#pymongo.mongo_client.MongoClient.write_concern
 
 MasterSlaveConnection
 ---------------------
 
 PyMongo's :class:`~pymongo.master_slave_connection.MasterSlaveConnection`
-offers a few conveniences when connected to a MongoDB `master-slave pair`_.
-Master-slave replication has long been superseded by `replica sets`_, so Motor
+offers a few conveniences when connected to a MongoDB `master-slave pair
+<http://dochub.mongodb.org/core/masterslave>`_.
+Master-slave replication has long been superseded by `replica sets
+<http://dochub.mongodb.org/core/rs>`_, so Motor
 has no equivalent to MasterSlaveConnection.
-
-.. _master-slave pair: http://docs.mongodb.org/manual/administration/master-slave/
-
-.. _replica sets: http://docs.mongodb.org/manual/core/replication/
 
 .. _gridfs-differences:
 
@@ -345,5 +275,34 @@ slicing operator blocks until it has queried the MongoDB server, and determines
 if a document exists at the desired offset; Motor simply returns a new
 :class:`~motor.MotorCursor` with a skip and limit applied.
 
-.. [#max_pool_size] See `PyMongo's max_pool_size
-  <http://api.mongodb.org/python/current/api/pymongo/mongo_client.html#pymongo.mongo_client.MongoClient.max_pool_size>`_
+Creating a collection
+---------------------
+
+There are two ways to create a capped collection using PyMongo:
+
+.. code-block:: python
+
+    # Typical:
+    db.create_collection(
+        'collection1',
+        capped=True,
+        size=1000)
+
+    # Unusual:
+    collection = Collection(
+        db,
+        'collection2',
+        capped=True,
+        size=1000)
+
+Motor can't do I/O in a constructor, so the unusual style is prohibited and
+only the typical style is allowed:
+
+.. code-block:: python
+
+    @gen.coroutine
+    def f():
+        yield db.create_collection(
+            'collection1',
+            capped=True,
+            size=1000)

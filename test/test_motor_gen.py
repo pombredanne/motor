@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,12 +21,13 @@ import pymongo.errors
 from tornado.testing import gen_test
 
 import motor
+import test
 from test import MotorTest, assert_raises
 
 
 class MotorGenTest(MotorTest):
     def tearDown(self):
-        self.sync_db.test_collection2.drop()
+        test.sync_db.test_collection2.drop()
         super(MotorGenTest, self).tearDown()
 
     @gen_test
@@ -34,7 +35,7 @@ class MotorGenTest(MotorTest):
         # motor.Op is deprecated in Motor 0.2, superseded by Tornado 3 Futures.
         # Just make sure it still works.
 
-        collection = self.cx.pymongo_test.test_collection
+        collection = self.collection
         doc = {'_id': 'jesse'}
 
         with warnings.catch_warnings(record=True) as w:

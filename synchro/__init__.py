@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -33,37 +33,28 @@ import motor
 # importing * won't pick up underscore-prefixed attrs.
 from gridfs.errors import *
 from pymongo import *
+from pymongo import member
 from pymongo import son_manipulator
+from pymongo import ssl_match_hostname
+from pymongo.helpers import _unpack_response, _check_command_response
 from pymongo.common import *
 from pymongo.cursor import *
 from pymongo.cursor import _QUERY_OPTIONS
 from pymongo.errors import *
-from pymongo.mongo_replica_set_client import PRIMARY, SECONDARY, OTHER
+from pymongo.member import PRIMARY, SECONDARY, OTHER
 from pymongo.read_preferences import *
 from pymongo.son_manipulator import *
 from pymongo.uri_parser import *
-from pymongo.uri_parser import _partition,_rpartition
-
-# TODO:
-try:
-    from pymongo import auth
-    from pymongo.auth import *
-    from pymongo.auth import _password_digest
-except ImportError:
-    # auth module will land in PyMongo 2.5
-    print "Warning: Can't import pymongo.auth"
-
-try:
-    from pymongo import GEOSPHERE, HASHED
-except ImportError:
-    # PyMongo 2.5
-    print "Warning: Can't import GEOSPHERE and HASHED"
-
+from pymongo.uri_parser import _partition, _rpartition
+from pymongo import auth
+from pymongo.auth import *
+from pymongo.auth import _password_digest
 from gridfs.grid_file import DEFAULT_CHUNK_SIZE, _SEEK_CUR, _SEEK_END
 
 GridFile = None
 have_gevent = False
 
+from pymongo import GEOSPHERE, HASHED
 from pymongo.pool import NO_REQUEST, NO_SOCKET_YET, SocketInfo, Pool, _closed
 from pymongo.mongo_replica_set_client import _partition_node, Member, Monitor
 
@@ -101,14 +92,23 @@ def wrap_synchro(fn):
             client = MongoClient(delegate=motor_obj.database.connection)
             database = Database(client, motor_obj.database.name)
             return Collection(database, motor_obj.name)
+        if isinstance(motor_obj, motor.MotorDatabase):
+            client = MongoClient(delegate=motor_obj.connection)
+            return Database(client, motor_obj.name)
+        if isinstance(motor_obj, motor.MotorCommandCursor):
+            return CommandCursor(motor_obj)
         if isinstance(motor_obj, motor.MotorCursor):
             return Cursor(motor_obj)
+        if isinstance(motor_obj, motor.MotorBulkOperationBuilder):
+            return BulkOperationBuilder(motor_obj)
         if isinstance(motor_obj, motor.MotorGridFS):
             return GridFS(motor_obj)
         if isinstance(motor_obj, motor.MotorGridIn):
             return GridIn(None, delegate=motor_obj)
         if isinstance(motor_obj, motor.MotorGridOut):
             return GridOut(None, delegate=motor_obj)
+        if isinstance(motor_obj, motor.MotorGridOutCursor):
+            return GridOutCursor(motor_obj)
         else:
             return motor_obj
 
@@ -138,7 +138,7 @@ class WrapOutgoing(object):
 
 
 class SynchroProperty(object):
-    """Used to fake private properties like Cursor.__slave_okay - don't use
+    """Used to fake private properties like MongoClient.__member - don't use
     for real properties like write_concern or you'll mask missing features in
     Motor!
     """
@@ -196,7 +196,7 @@ class SynchroMeta(type):
                             attrname, delegate_attr.has_write_concern)
                         setattr(new_class, attrname, sync_method)
                     elif isinstance(
-                            delegate_attr, motor.UnwrapAsync):
+                            delegate_attr, motor.Unwrap):
                         # Re-synchronize the method.
                         sync_method = Sync(
                             attrname, delegate_attr.prop.has_write_concern)
@@ -272,23 +272,41 @@ class Synchro(object):
         except (AttributeError, InvalidOperation):
             return True
 
+    @safe.setter
+    def safe(self, value):
+        if value:
+            # Set Motor object's write_concern. Safe by default with no 'w'.
+            self.delegate.write_concern.pop('w', None)
+        else:
+            # Unsafe.
+            self.delegate.write_concern['w'] = 0
+
     @property
     def slave_okay(self):
-        try:
-            return self.delegate.read_preference != ReadPreference.PRIMARY
-        except (AttributeError, InvalidOperation):
-            return False
+        motor_obj = self.delegate
+        pymongo_obj = motor_obj.delegate
 
+        pref = getattr(motor_obj, 'read_preference', ReadPreference.PRIMARY)
+        slave_okay = getattr(pymongo_obj, 'slave_okay', False)
+
+        return (pref != ReadPreference.PRIMARY) or slave_okay
+
+    def __eq__(self, other):
+        return self.delegate == other.delegate
+
+    _get_write_mode       = SynchroProperty()
     get_lasterror_options = SynchroProperty()
 
 
-class MongoClient(Synchro):
-    HOST = 'localhost'
-    PORT = 27017
+class MongoClientBase(Synchro):
+    get_default_database = WrapOutgoing()
+    max_pool_size = SynchroProperty()
 
-    __delegate_class__ = motor.MotorClient
+    def __init__(self, *args, **kwargs):
+        # Make a unittest happy.
+        self.use_greenlets = True
+        self.auto_start_request = True
 
-    def __init__(self, host=None, port=None, *args, **kwargs):
         # Motor doesn't implement auto_start_request.
         kwargs.pop('auto_start_request', None)
 
@@ -311,22 +329,35 @@ class MongoClient(Synchro):
             (k, v) for k, v in kwargs.items()
             if k in SAFE_OPTIONS])
 
-        if gle_opts:
+        if gle_opts and 'w' not in gle_opts:
             kwargs['w'] = 1
 
-        # So that TestClient.test_constants and test_types work.
-        host = host if host is not None else self.HOST
-        port = port if port is not None else self.PORT
+        if 'safe' in kwargs:
+            safe = kwargs.pop('safe')
+            if not safe:
+                kwargs.setdefault('w', 0)
+
         self.delegate = kwargs.pop('delegate', None)
 
         if not self.delegate:
-            self.delegate = self.__delegate_class__(host, port, *args, **kwargs)
-            self.synchro_connect()
+            self.delegate = self.__delegate_class__(*args, **kwargs)
+            if kwargs.get('_connect', True):
+                self.synchro_connect()
 
     def synchro_connect(self):
         # Try to connect the MotorClient before continuing; raise
         # ConnectionFailure if it times out.
-        self.synchronize(self.delegate.open)()
+        try:
+            self.synchronize(self.delegate.open)()
+        except OperationFailure, exc:
+            # Emulate PyMongo's behavior: auth failure during initialization
+            # is translated to ConfigurationError.
+            if 'auth fails' in str(exc):
+                raise ConfigurationError(str(exc))
+
+            raise
+        except AutoReconnect, e:
+            raise ConnectionFailure(str(e))
 
     def start_request(self):
         raise NotImplementedError()
@@ -353,7 +384,21 @@ class MongoClient(Synchro):
 
     __getitem__ = __getattr__
 
-    _MongoClient__pool        = SynchroProperty()
+
+class MongoClient(MongoClientBase):
+    __delegate_class__ = motor.MotorClient
+
+    HOST = 'localhost'
+    PORT = 27017
+
+    def __init__(self, host=None, port=None, *args, **kwargs):
+        # So that TestClient.test_constants and test_types work.
+        host = host if host is not None else self.HOST
+        port = port if port is not None else self.PORT
+
+        super(MongoClient, self).__init__(host, port, *args, **kwargs)
+
+    _MongoClient__member      = SynchroProperty()
     _MongoClient__net_timeout = SynchroProperty()
 
 
@@ -364,17 +409,12 @@ class MasterSlaveConnection(object):
     pass
 
 
-class MongoReplicaSetClient(MongoClient):
+class MongoReplicaSetClient(MongoClientBase):
     __delegate_class__ = motor.MotorReplicaSetClient
 
-    def __init__(self, *args, **kwargs):
-        # Motor doesn't implement auto_start_request.
-        kwargs.pop('auto_start_request', None)
-        self.delegate = self.__delegate_class__(*args, **kwargs)
-        self.synchro_connect()
-
+    get_default_database                     = WrapOutgoing()
     _MongoReplicaSetClient__writer           = SynchroProperty()
-    _MongoReplicaSetClient__members          = SynchroProperty()
+    _MongoReplicaSetClient__rs_state         = SynchroProperty()
     _MongoReplicaSetClient__schedule_refresh = SynchroProperty()
     _MongoReplicaSetClient__net_timeout      = SynchroProperty()
 
@@ -383,8 +423,9 @@ class Database(Synchro):
     __delegate_class__ = motor.MotorDatabase
 
     def __init__(self, client, name):
-        assert isinstance(client, MongoClient), (
-            "Expected MongoClient, got %s" % repr(client))
+        assert isinstance(client, (MongoClient, MongoReplicaSetClient)), (
+            "Expected MongoClient or MongoReplicaSetClient, got %s"
+            % repr(client))
 
         self.connection = client
 
@@ -410,18 +451,23 @@ class Database(Synchro):
 class Collection(Synchro):
     __delegate_class__ = motor.MotorCollection
 
-    find = WrapOutgoing()
+    find                            = WrapOutgoing()
+    initialize_unordered_bulk_op    = WrapOutgoing()
+    initialize_ordered_bulk_op      = WrapOutgoing()
 
     def __init__(self, database, name):
-        assert isinstance(database, Database), (
-            "First argument to synchro Collection must be synchro Database,"
-            " not %s" % repr(database))
-        self.database = database
+        if not isinstance(database, Database):
+            raise TypeError(
+                "First argument to synchro Collection must be synchro "
+                "Database, not %s" % repr(database))
 
+        self.database = database
         self.delegate = database.delegate[name]
-        assert isinstance(self.delegate, motor.MotorCollection), (
-            "Expected to get synchro Collection from Database,"
-            " got %s" % repr(self.delegate))
+
+        if not isinstance(self.delegate, motor.MotorCollection):
+            raise TypeError(
+                "Expected to get synchro Collection from Database,"
+                " got %s" % repr(self.delegate))
 
     def __getattr__(self, name):
         # Access to collections with dotted names, like db.test.mike
@@ -435,6 +481,7 @@ class Cursor(Synchro):
 
     rewind                     = WrapOutgoing()
     clone                      = WrapOutgoing()
+    close                      = SynchroProperty()
 
     def __init__(self, motor_cursor):
         self.delegate = motor_cursor
@@ -454,8 +501,7 @@ class Cursor(Synchro):
 
     def next(self):
         cursor = self.delegate
-        # Hack, sorry
-        if cursor.delegate._Cursor__empty:
+        if cursor._empty():
             raise StopIteration
 
         if cursor._buffer_size():
@@ -488,6 +534,16 @@ class Cursor(Synchro):
         # Don't suppress exceptions.
         return False
 
+    @property
+    def _Cursor__slave_okay(self):
+        # Another hack; PyMongo's tests don't check this field on
+        # CommandCursor, so assume self.delegate is a regular Cursor.
+        pymongo_cursor = self.delegate.delegate
+        pref = pymongo_cursor._Cursor__read_preference
+        return (
+            pymongo_cursor._Cursor__slave_okay
+            or pref != ReadPreference.PRIMARY)
+
     _Cursor__id                = SynchroProperty()
     _Cursor__query_options     = SynchroProperty()
     _Cursor__query_spec        = SynchroProperty()
@@ -498,7 +554,6 @@ class Cursor(Synchro):
     _Cursor__snapshot          = SynchroProperty()
     _Cursor__tailable          = SynchroProperty()
     _Cursor__as_class          = SynchroProperty()
-    _Cursor__slave_okay        = SynchroProperty()
     _Cursor__await_data        = SynchroProperty()
     _Cursor__partial           = SynchroProperty()
     _Cursor__manipulate        = SynchroProperty()
@@ -509,19 +564,75 @@ class Cursor(Synchro):
     _Cursor__fields            = SynchroProperty()
     _Cursor__spec              = SynchroProperty()
     _Cursor__hint              = SynchroProperty()
+    _Cursor__exhaust           = SynchroProperty()
+    _Cursor__compile_re        = SynchroProperty()
+    _Cursor__max_time_ms       = SynchroProperty()
+    _Cursor__comment           = SynchroProperty()
+    _Cursor__min               = SynchroProperty()
+    _Cursor__max               = SynchroProperty()
     _Cursor__secondary_acceptable_latency_ms = SynchroProperty()
+
+
+class CommandCursor(Cursor):
+    __delegate_class__ = motor.MotorCommandCursor
+
+
+class GridOutCursor(Cursor):
+    __delegate_class__ = motor.MotorGridOutCursor
+
+    def __init__(self, delegate):
+        if not isinstance(delegate, motor.MotorGridOutCursor):
+            raise TypeError(
+                "Expected MotorGridOutCursor, got %r" % delegate)
+
+        self.delegate = delegate
+
+    def next(self):
+        motor_grid_out = super(GridOutCursor, self).next()
+        if motor_grid_out:
+            return GridOut(self.collection, delegate=motor_grid_out)
+
+    _Cursor__secondary_acceptable_latency_ms = SynchroProperty()
+
+
+class CursorManager(object):
+    """Motor doesn't support cursor managers, just avoid ImportError.
+    """
+    pass
+
+
+class BulkOperationBuilder(Synchro):
+    __delegate_class__ = motor.MotorBulkOperationBuilder
+
+    # execute     = Sync()
+    # find        = WrapOutgoing()
+    # insert      = WrapOutgoing()
+
+    def __init__(self, motor_bob):
+        if not isinstance(motor_bob, motor.MotorBulkOperationBuilder):
+            raise TypeError(
+                "Expected MotorBulkOperationBuilder, got %r" % motor_bob)
+
+        self.delegate = motor_bob
 
 
 class GridFS(Synchro):
     __delegate_class__ = motor.MotorGridFS
 
-    def __init__(self, database, collection='fs'):
+    def __init__(self, database, collection='fs', _connect=True):
         if not isinstance(database, Database):
             raise TypeError(
                 "Expected Database, got %s" % repr(database))
 
-        self.delegate = self.synchronize(
-            motor.MotorGridFS(database.delegate, collection).open)()
+        self.delegate = motor.MotorGridFS(database.delegate, collection)
+
+    def put(self, *args, **kwargs):
+        return self.synchronize(self.delegate.put)(*args, **kwargs)
+
+    def find(self, *args, **kwargs):
+        motor_method = self.delegate.find
+        unwrapping_method = wrap_synchro(unwrap_synchro(motor_method))
+        return unwrapping_method(*args, **kwargs)
 
 
 class GridIn(Synchro):
@@ -540,7 +651,6 @@ class GridIn(Synchro):
                     "Expected Collection, got %s" % repr(collection))
 
             self.delegate = motor.MotorGridIn(collection.delegate, **kwargs)
-            self.synchronize(self.delegate.open)()
 
     def __getattr__(self, item):
         return getattr(self.delegate, item)
@@ -550,8 +660,8 @@ class GridOut(Synchro):
     __delegate_class__ = motor.MotorGridOut
 
     def __init__(
-        self, root_collection, file_id=None, file_document=None, delegate=None
-    ):
+            self, root_collection, file_id=None, file_document=None,
+            _connect=True, delegate=None):
         """Can be created with collection and kwargs like a PyMongo GridOut,
         or with a 'delegate' keyword arg, where delegate is a MotorGridOut.
         """
@@ -564,10 +674,23 @@ class GridOut(Synchro):
 
             self.delegate = motor.MotorGridOut(
                 root_collection.delegate, file_id, file_document)
-            self.synchronize(self.delegate.open)()
+
+            if _connect:
+                self.synchronize(self.delegate.open)()
 
     def __getattr__(self, item):
+        self.synchronize(self.delegate.open)()
         return getattr(self.delegate, item)
+
+    def __setattr__(self, key, value):
+        # PyMongo's GridOut prohibits setting these values; do the same
+        # to make PyMongo's assertRaises tests pass.
+        if key in (
+                "_id", "name", "content_type", "length", "chunk_size",
+                "upload_date", "aliases", "metadata", "md5"):
+            raise AttributeError()
+
+        super(GridOut, self).__setattr__(key, value)
 
 
 class TimeModule(object):

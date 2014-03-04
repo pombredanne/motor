@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,33 +18,26 @@ import unittest
 
 import pymongo.errors
 import pymongo.mongo_replica_set_client
-from tornado import iostream
+from nose.plugins.skip import SkipTest
+from tornado import iostream, gen
 from tornado.testing import gen_test
 
 import motor
-from test import host, port, MotorReplicaSetTestBase, assert_raises
+import test
+from test import host, port, MotorReplicaSetTestBase, assert_raises, MotorTest
+from test.motor_client_test_generic import MotorClientTestMixin
 
 
 class MotorReplicaSetTest(MotorReplicaSetTestBase):
     @gen_test
     def test_replica_set_client(self):
         cx = motor.MotorReplicaSetClient(
-            '%s:%s' % (host, port), replicaSet=self.name, io_loop=self.io_loop)
+            '%s:%s' % (host, port),
+            replicaSet=test.rs_name,
+            io_loop=self.io_loop)
 
-        # Can't access databases before connecting
-        self.assertRaises(
-            pymongo.errors.InvalidOperation,
-            lambda: cx.some_database_name
-        )
-
-        self.assertRaises(
-            pymongo.errors.InvalidOperation,
-            lambda: cx['some_database_name']
-        )
-
-        result = yield cx.open()
-        self.assertEqual(result, cx)
-        self.assertTrue(cx.connected)
+        self.assertEqual(cx, (yield cx.open()))
+        self.assertEqual(cx, (yield cx.open()))  # Same the second time.
         self.assertTrue(isinstance(
             cx.delegate._MongoReplicaSetClient__monitor,
             motor.MotorReplicaSetMonitor))
@@ -53,73 +46,24 @@ class MotorReplicaSetTest(MotorReplicaSetTestBase):
             self.io_loop,
             cx.delegate._MongoReplicaSetClient__monitor.io_loop)
 
+        cx.close()
+
     @gen_test
     def test_open_callback(self):
         cx = motor.MotorReplicaSetClient(
-            '%s:%s' % (host, port), replicaSet=self.name, io_loop=self.io_loop)
+            '%s:%s' % (host, port),
+            replicaSet=test.rs_name,
+            io_loop=self.io_loop)
+
         yield self.check_optional_callback(cx.open)
         cx.close()
 
     def test_io_loop(self):
         with assert_raises(TypeError):
             motor.MotorReplicaSetClient(
-                '%s:%s' % (host, port), replicaSet=self.name, io_loop='foo')
-
-    @gen_test
-    def test_open_sync(self):
-        cx = motor.MotorReplicaSetClient(
-            host, port, replicaSet=self.name, io_loop=self.io_loop)
-
-        self.assertFalse(cx.connected)
-
-        # open_sync() creates a special IOLoop just to run the connection
-        # code to completion
-        self.assertEqual(cx, cx.open_sync())
-        self.assertTrue(cx.connected)
-
-        # IOLoop was restored?
-        self.assertEqual(self.io_loop, cx.io_loop)
-
-        # Really connected?
-        result = yield cx.pymongo_test.test_collection.find_one({'_id': 0})
-
-        self.assertEqual(0, result['_id'])
-        cx.close()
-
-    @gen_test
-    def test_sync_client(self):
-        class DictSubclass(dict):
-            pass
-
-        args = ['%s:%s' % (host, port)]
-        kwargs = dict(
-            connectTimeoutMS=1000, socketTimeoutMS=1500, max_pool_size=23,
-            document_class=DictSubclass, tz_aware=True, replicaSet=self.name,
-            io_loop=self.io_loop)
-
-        cx = yield motor.MotorReplicaSetClient(*args, **kwargs).open()
-        sync_cx = cx.sync_client()
-        self.assertTrue(isinstance(
-            sync_cx, pymongo.mongo_replica_set_client.MongoReplicaSetClient))
-        self.assertFalse(isinstance(
-            sync_cx._MongoReplicaSetClient__monitor,
-            motor.MotorReplicaSetMonitor))
-        self.assertEqual(
-            1000,
-            sync_cx._MongoReplicaSetClient__conn_timeout * 1000.0)
-        self.assertEqual(
-            1500,
-            sync_cx._MongoReplicaSetClient__net_timeout * 1000.0)
-        self.assertEqual(23, sync_cx.max_pool_size)
-        self.assertEqual(True, sync_cx._MongoReplicaSetClient__tz_aware)
-        self.assertEqual(
-            DictSubclass,
-            sync_cx._MongoReplicaSetClient__document_class)
-
-        # Make sure sync client works
-        self.assertEqual(
-            {'_id': 5, 's': hex(5)},
-            sync_cx.pymongo_test.test_collection.find_one({'_id': 5}))
+                '%s:%s' % (host, port),
+                replicaSet=test.rs_name,
+                io_loop='foo')
 
     @gen_test
     def test_auto_reconnect_exception_when_read_preference_is_secondary(self):
@@ -127,13 +71,54 @@ class MotorReplicaSetTest(MotorReplicaSetTestBase):
         iostream.IOStream.write = lambda self, data: self.close()
 
         try:
-            cursor = self.rsc.pymongo_test.test_collection.find(
+            cursor = self.rsc.motor_test.test_collection.find(
                 read_preference=pymongo.ReadPreference.SECONDARY)
 
             with assert_raises(pymongo.errors.AutoReconnect):
                 yield cursor.fetch_next
         finally:
             iostream.IOStream.write = old_write
+
+    @gen_test
+    def test_connection_failure(self):
+        # Assuming there isn't anything actually running on this port
+        client = motor.MotorReplicaSetClient(
+            'localhost:8765', replicaSet='rs', io_loop=self.io_loop)
+
+        # Test the Future interface.
+        with assert_raises(pymongo.errors.ConnectionFailure):
+            yield client.open()
+
+        # Test with a callback.
+        (result, error), _ = yield gen.Task(client.open)
+        self.assertEqual(None, result)
+        self.assertTrue(isinstance(error, pymongo.errors.ConnectionFailure))
+
+
+class MotorReplicaSetClientTestGeneric(
+        MotorClientTestMixin,
+        MotorReplicaSetTestBase):
+
+    def get_client(self):
+        return self.rsc
+
+
+class TestReplicaSetClientAgainstStandalone(MotorTest):
+    """This is a funny beast -- we want to run tests for MotorReplicaSetClient
+    but only if the database at DB_IP and DB_PORT is a standalone.
+    """
+    def setUp(self):
+        super(TestReplicaSetClientAgainstStandalone, self).setUp()
+        if test.is_replica_set:
+            raise SkipTest(
+                "Connected to a replica set, not a standalone mongod")
+
+    @gen_test
+    def test_connect(self):
+        with assert_raises(pymongo.errors.ConnectionFailure):
+            yield motor.MotorReplicaSetClient(
+                '%s:%s' % (host, port), replicaSet='anything',
+                connectTimeoutMS=600).test.test.find_one()
 
 
 if __name__ == '__main__':

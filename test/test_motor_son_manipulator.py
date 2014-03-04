@@ -1,4 +1,4 @@
-# Copyright 2013 10gen, Inc.
+# Copyright 2013-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 import pymongo.son_manipulator
 from tornado.testing import gen_test
 
+import test
 from test import MotorTest
 
 
@@ -36,16 +37,14 @@ class CustomSONManipulator(pymongo.son_manipulator.SONManipulator):
 class SONManipulatorTest(MotorTest):
     def setUp(self):
         super(SONManipulatorTest, self).setUp()
-        self.sync_db.son_manipulator_test_collection.drop()
-        self.coll = self.cx.pymongo_test.son_manipulator_test_collection
 
     def tearDown(self):
-        self.sync_db.son_manipulator_test_collection.drop()
+        test.sync_db.son_manipulator_test_collection.remove()
         super(SONManipulatorTest, self).tearDown()
 
     @gen_test
     def test_with_find_one(self):
-        coll = self.coll
+        coll = self.cx.motor_test.son_manipulator_test_collection
         _id = yield coll.insert({'foo': 'bar'})
         self.assertEqual(
             {'_id': _id, 'foo': 'bar'},
@@ -59,7 +58,7 @@ class SONManipulatorTest(MotorTest):
 
     @gen_test
     def test_with_fetch_next(self):
-        coll = self.coll
+        coll = self.cx.motor_test.son_manipulator_test_collection
         coll.database.add_son_manipulator(CustomSONManipulator())
         _id = yield coll.insert({'foo': 'bar'})
         cursor = coll.find()
@@ -70,7 +69,7 @@ class SONManipulatorTest(MotorTest):
 
     @gen_test
     def test_with_to_list(self):
-        coll = self.coll
+        coll = self.cx.motor_test.son_manipulator_test_collection
         _id1, _id2 = yield coll.insert([{}, {}])
         found = yield coll.find().sort([('_id', 1)]).to_list(length=2)
         self.assertEqual([{'_id': _id1}, {'_id': _id2}], found)

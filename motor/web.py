@@ -1,4 +1,4 @@
-# Copyright 2011-2012 10gen, Inc.
+# Copyright 2011-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -41,7 +41,7 @@ class GridFSHandler(tornado.web.RequestHandler):
 
     .. code-block:: python
 
-        db = motor.MotorClient().open_sync().my_database
+        db = motor.MotorClient().my_database
         application = web.Application([
             (r"/static/(.*)", web.GridFSHandler, {"database": db}),
         ])
@@ -52,7 +52,7 @@ class GridFSHandler(tornado.web.RequestHandler):
     MongoDB. Override :meth:`get_cache_time` in a subclass to customize this.
 
     .. seealso:: MongoDB and `GridFS
-       <http://docs.mongodb.org/manual/applications/gridfs/>`_
+       <http://dochub.mongodb.org/core/gridfs>`_
 
     .. seealso:: `StaticFileHandler
        <http://tornadoweb.org/en/stable/web.html#tornado.web.StaticFileHandler>`_
@@ -94,7 +94,7 @@ class GridFSHandler(tornado.web.RequestHandler):
     @tornado.web.asynchronous
     @gen.coroutine
     def get(self, path, include_body=True):
-        fs = yield motor.MotorGridFS(self.database, self.root_collection).open()
+        fs = motor.MotorGridFS(self.database, self.root_collection)
 
         try:
             gridout = yield self.get_gridfs_file(fs, path)

@@ -28,7 +28,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'Motor'
-copyright = u'2012 10gen'
+copyright = u'2014 MongoDB, Inc.'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -175,5 +175,8 @@ autodoc_default_flags = ['inherited-members']
 autodoc_member_order = 'groupwise'
 
 intersphinx_mapping = {
+    'bson': ('http://api.mongodb.org/python/current/', None),
+    'gridfs': ('http://api.mongodb.org/python/current/', None),
     'pymongo': ('http://api.mongodb.org/python/current/', None),
+    'tornado': ('http://www.tornadoweb.org/en/stable/', None),
 }

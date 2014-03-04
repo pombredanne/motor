@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,9 @@ from pymongo.son_manipulator import AutoReference, NamespaceInjector
 from tornado.testing import gen_test
 
 import motor
-from test import MotorTest, assert_raises
+import test
+from test import version, MotorTest, assert_raises
+from test.utils import remove_all_users
 
 
 class MotorDatabaseTest(MotorTest):
@@ -30,21 +32,40 @@ class MotorDatabaseTest(MotorTest):
     def test_database(self):
         # Test that we can create a db directly, not just from MotorClient's
         # accessors
-        db = motor.MotorDatabase(self.cx, 'pymongo_test')
+        db = motor.MotorDatabase(self.cx, 'motor_test')
 
         # Make sure we got the right DB and it can do an operation
+        self.assertEqual('motor_test', db.name)
+        test.sync_collection.insert({'_id': 1})
         doc = yield db.test_collection.find_one({'_id': 1})
-        self.assertEqual(hex(1), doc['s'])
+        self.assertEqual(1, doc['_id'])
 
     def test_collection_named_delegate(self):
-        db = self.motor_client_sync().pymongo_test
+        db = self.db
         self.assertTrue(isinstance(db.delegate, pymongo.database.Database))
         self.assertTrue(isinstance(db['delegate'], motor.MotorCollection))
         db.connection.close()
 
+    def test_call(self):
+        # Prevents user error with nice message.
+        try:
+            self.cx.foo()
+        except TypeError, e:
+            self.assertTrue('no such method exists' in str(e))
+        else:
+            self.fail('Expected TypeError')
+
+        try:
+            # First line of applications written for Motor 0.1.
+            self.cx.open_sync()
+        except TypeError, e:
+            self.assertTrue('unnecessary' in str(e))
+        else:
+            self.fail('Expected TypeError')
+
     @gen_test
     def test_database_callbacks(self):
-        db = self.cx.pymongo_test
+        db = self.db
         yield self.check_optional_callback(db.drop_collection, 'c')
 
         # check_optional_callback would call create_collection twice, and the
@@ -72,7 +93,7 @@ class MotorDatabaseTest(MotorTest):
     def test_create_collection(self):
         # Test creating collection, return val is wrapped in MotorCollection,
         # creating it again raises CollectionInvalid.
-        db = self.cx.pymongo_test
+        db = self.db
         yield db.drop_collection('test_collection2')
         collection = yield db.create_collection('test_collection2')
         self.assertTrue(isinstance(collection, motor.MotorCollection))
@@ -86,18 +107,18 @@ class MotorDatabaseTest(MotorTest):
 
         # Test creating capped collection
         collection = yield db.create_collection(
-            'test_capped', capped=True, size=1000)
+            'test_capped', capped=True, size=4096)
 
         self.assertTrue(isinstance(collection, motor.MotorCollection))
         self.assertEqual(
-            {"capped": True, 'size': 1000},
+            {"capped": True, 'size': 4096},
             (yield db.test_capped.options()))
         yield db.drop_collection('test_capped')
 
     @gen_test
     def test_drop_collection(self):
         # Make sure we can pass a MotorCollection instance to drop_collection
-        db = self.cx.pymongo_test
+        db = self.db
         collection = db.test_drop_collection
         yield collection.insert({})
         names = yield db.collection_names()
@@ -117,7 +138,7 @@ class MotorDatabaseTest(MotorTest):
         # implementation for Motor for async is a little complex so we test
         # that it works here, and we don't just rely on synchrotest
         # to cover it.
-        db = self.cx.pymongo_test
+        db = self.db
 
         # We test a special hack where add_son_manipulator corrects our mistake
         # if we pass a MotorDatabase, instead of Database, to AutoReference.
@@ -149,27 +170,34 @@ class MotorDatabaseTest(MotorTest):
 
     @gen_test
     def test_authenticate(self):
-        cx = yield self.motor_client()
-        db = cx.pymongo_test
+        db = self.db
+        try:
+            yield self.cx.admin.add_user("admin", "password")
+            yield self.cx.admin.authenticate("admin", "password")
+            yield db.add_user("mike", "password")
 
-        yield db.system.users.remove()
-        yield db.add_user("mike", "password")
-        users = yield db.system.users.find().to_list(length=10)
-        self.assertTrue("mike" in [u['user'] for u in users])
+            # Authenticate many times at once to test concurrency.
+            yield [db.authenticate("mike", "password") for _ in range(10)]
 
-        # We need to authenticate many times at once to make sure that
-        # Pool's start_request() is properly isolating operations
-        yield [db.authenticate("mike", "password") for _ in range(100)]
+            # just make sure there are no exceptions here
+            yield db.remove_user("mike")
+            yield db.logout()
+            if (yield version.at_least(self.cx, (2, 5, 4))):
+                info = yield db.command("usersInfo", "mike")
+                users = info.get('users', [])
+            else:
+                users = yield db.system.users.find().to_list(length=10)
 
-        # just make sure there are no exceptions here
-        yield db.logout()
-        yield db.remove_user("mike")
-        users = yield db.system.users.find().to_list(length=10)
-        self.assertFalse("mike" in [u['user'] for u in users])
+            self.assertFalse("mike" in [u['user'] for u in users])
+
+        finally:
+            yield remove_all_users(db)
+            yield self.cx.admin.remove_user('admin')
+            test.sync_cx.disconnect()
 
     @gen_test
     def test_validate_collection(self):
-        db = self.cx.pymongo_test
+        db = self.db
 
         with assert_raises(TypeError):
             yield db.validate_collection(5)

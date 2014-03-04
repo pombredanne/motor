@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ from tornado.web import Application
 
 import motor
 import motor.web
+import test
 from test import host, port
 
 
@@ -38,8 +39,8 @@ class GridFSHandlerTestBase(AsyncHTTPTestCase):
     def setUp(self):
         super(GridFSHandlerTestBase, self).setUp()
 
-        self.sync_db = pymongo.MongoClient(host, port).pymongo_test
-        self.fs = gridfs.GridFS(self.sync_db)
+        test.sync_db = pymongo.MongoClient(host, port).motor_test
+        self.fs = gridfs.GridFS(test.sync_db)
 
         # Make a 500k file in GridFS with filename 'foo'
         self.contents = b('Jesse' * 100 * 1024)
@@ -56,8 +57,7 @@ class GridFSHandlerTestBase(AsyncHTTPTestCase):
         self.assertTrue(self.fs.get_last_version('foo'))
 
     def motor_db(self):
-        return motor.MotorClient(
-            host, port, io_loop=self.io_loop).open_sync().pymongo_test
+        return motor.MotorClient(host, port, io_loop=self.io_loop).motor_test
 
     def tearDown(self):
         self.fs.delete(self.file_id)

@@ -33,45 +33,44 @@ major, minor = sys.version_info[:2]
 
 kwargs = {}
 if major >= 3:
-    sys.stdout.write('using 2to3\n')
     kwargs['use_2to3'] = True
 
-# HACK: implement "setup.py build --test" to work around
-# https://github.com/nose-devs/nose/issues/556, which causes e.g.
-# "python setup.py nosetests --tests test.test_motor_ssl" to run all the tests,
-# not just the ones specified.
-
-# For now, "setup.py build --test" builds Motor and its tests, so you can then
-# "cd build/lib; nosetests test.test_motor_ssl" and test specific modules in
-# the built package.
-
 packages = ['motor']
-if 'test' in sys.argv or 'nosetests' in sys.argv or '--test' in sys.argv:
-    if '--test' in sys.argv:
-        sys.stdout.write('including test modules\n')
-        sys.argv.remove('--test')
+package_data = {}
+if 'test' in sys.argv:
+    sys.argv.remove('test')
+    sys.argv.append('nosetests')
+    package_data['test'] = ['certificates/*']
 
+if 'nosetests' in sys.argv:
     packages.append('test')
+    package_data['test'] = ['certificates/ca.pem', 'certificates/client.pem']
+
+pymongo_url = (
+    'https://github.com/mongodb/mongo-python-driver/archive/2.7rc0.tar.gz'
+    '#egg=pymongo-2.7rc0')
 
 setup(name='motor',
       version='0.1+',
       packages=packages,
+      package_data=package_data,
       description=description,
       long_description=long_description,
       author='A. Jesse Jiryu Davis',
-      author_email='jesse@10gen.com',
+      author_email='jesse@mongodb.com',
       url='https://github.com/mongodb/motor/',
       install_requires=[
-          'pymongo >= 2.6',
           'tornado >= 3.1',
           'greenlet >= 0.4.0',
+          'pymongo == 2.7rc0',
       ],
+      dependency_links=[pymongo_url],
       license='http://www.apache.org/licenses/LICENSE-2.0',
       classifiers=filter(None, classifiers.split('\n')),
       keywords=[
           "mongo", "mongodb", "pymongo", "gridfs", "bson", "motor", "tornado",
       ],
-      # use 'python setup.py test' to test
+      # Use 'python setup.py test' or 'python setup.py nosetests' to test.
       setup_requires=['nose'],
       test_suite='nose.main',
       zip_safe=False,

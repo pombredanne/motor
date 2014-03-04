@@ -1,4 +1,4 @@
-# Copyright 2013 10gen, Inc.
+# Copyright 2013-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,14 +14,15 @@
 
 """Test Motor's test helpers."""
 
+from tornado.concurrent import Future
 from tornado.testing import gen_test
 
 from motor import callback_type_error
 from test import MotorTest, assert_raises
 
 
-# Example functions to be tested, helps verify that check_optional_callback and
-# check_required_callback work.
+# Example function to be tested, helps verify that check_optional_callback
+# works.
 def require_callback(callback=None):
     if not callable(callback):
         raise callback_type_error
@@ -29,17 +30,18 @@ def require_callback(callback=None):
 
 
 def dont_require_callback(callback=None):
-    if callback is not None:
-        require_callback(callback)
+    if callback:
+        if not callable(callback):
+            raise callback_type_error
+
+        callback(None, None)
+    else:
+        future = Future()
+        future.set_result(None)
+        return future
 
 
 class MotorCallbackTestTest(MotorTest):
-    @gen_test
-    def test_check_required_callback(self):
-        yield self.check_required_callback(require_callback)
-        with assert_raises(Exception):
-            yield self.check_required_callback(dont_require_callback)
-
     @gen_test
     def test_check_optional_callback(self):
         yield self.check_optional_callback(dont_require_callback)

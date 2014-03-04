@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,6 +39,91 @@ except ImportError:
 host = os.environ.get("DB_IP", "localhost")
 port = int(os.environ.get("DB_PORT", 27017))
 
+CERT_PATH = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), 'certificates')
+CLIENT_PEM = os.path.join(CERT_PATH, 'client.pem')
+CA_PEM = os.path.join(CERT_PATH, 'ca.pem')
+
+mongod_started_with_ssl = False
+mongod_validates_client_cert = False
+sync_cx = None
+sync_db = None
+sync_collection = None
+is_replica_set = False
+rs_name = None
+w = None
+hosts = None
+arbiters = None
+primary = None
+secondaries = None
+
+
+def setup_package():
+    global mongod_started_with_ssl
+    global mongod_validates_client_cert
+    global sync_cx
+    global sync_db
+    global sync_collection
+    global is_replica_set
+    global rs_name
+    global w
+    global hosts
+    global arbiters
+    global primary
+    global secondaries
+
+    connectTimeoutMS = socketTimeoutMS = 30 * 1000
+
+    # Store a regular synchronous pymongo MongoClient for convenience while
+    # testing. Try over SSL first.
+    try:
+        sync_cx = pymongo.MongoClient(
+            host, port,
+            connectTimeoutMS=connectTimeoutMS,
+            socketTimeoutMS=socketTimeoutMS,
+            ssl=True)
+
+        mongod_started_with_ssl = True
+    except pymongo.errors.ConnectionFailure:
+        try:
+            sync_cx = pymongo.MongoClient(
+                host, port,
+                connectTimeoutMS=connectTimeoutMS,
+                socketTimeoutMS=socketTimeoutMS,
+                ssl_certfile=CLIENT_PEM)
+
+            mongod_started_with_ssl = True
+            mongod_validates_client_cert = True
+        except pymongo.errors.ConnectionFailure:
+            sync_cx = pymongo.MongoClient(
+                host, port,
+                connectTimeoutMS=connectTimeoutMS,
+                socketTimeoutMS=socketTimeoutMS,
+                ssl=False)
+
+    sync_db = sync_cx.motor_test
+    sync_collection = sync_db.test_collection
+
+    is_replica_set = False
+    response = sync_cx.admin.command('ismaster')
+    if 'setName' in response:
+        is_replica_set = True
+        rs_name = str(response['setName'])
+        w = len(response['hosts'])
+        hosts = set([_partition_node(h) for h in response["hosts"]])
+        arbiters = set([
+            _partition_node(h) for h in response.get("arbiters", [])])
+
+        repl_set_status = sync_cx.admin.command('replSetGetStatus')
+        primary_info = [
+            m for m in repl_set_status['members']
+            if m['stateStr'] == 'PRIMARY'][0]
+
+        primary = _partition_node(primary_info['name'])
+        secondaries = [
+            _partition_node(m['name']) for m in repl_set_status['members']
+            if m['stateStr'] == 'SECONDARY']
+        
 
 @contextlib.contextmanager
 def assert_raises(exc_class):
@@ -65,63 +150,26 @@ class MotorTest(PauseMixin, testing.AsyncTestCase):
     def setUp(self):
         super(MotorTest, self).setUp()
 
-        # Store a regular synchronous pymongo MongoClient for convenience while
-        # testing. Set a timeout so we don't hang a test because, say, Mongo
-        # isn't up or is hung by a long-running $where clause.
-        connectTimeoutMS = socketTimeoutMS = 30 * 1000
-        if self.ssl:
-            if not HAVE_SSL:
-                raise SkipTest("Python compiled without SSL")
-            try:
-                self.sync_cx = pymongo.MongoClient(
-                    host, port, connectTimeoutMS=connectTimeoutMS,
-                    socketTimeoutMS=socketTimeoutMS,
-                    ssl=True)
-            except pymongo.errors.ConnectionFailure:
-                raise SkipTest("mongod doesn't support SSL, or is down")
-        else:
-            self.sync_cx = pymongo.MongoClient(
-                host, port, connectTimeoutMS=connectTimeoutMS,
-                socketTimeoutMS=socketTimeoutMS,
-                ssl=False)
+        if self.ssl and not mongod_started_with_ssl:
+            raise SkipTest("mongod doesn't support SSL, or is down")
 
-        self.is_replica_set = False
-        response = self.sync_cx.admin.command('ismaster')
-        if 'setName' in response:
-            self.is_replica_set = True
-            self.name = str(response['setName'])
-            self.w = len(response['hosts'])
-            self.hosts = set([_partition_node(h) for h in response["hosts"]])
-            self.arbiters = set([
-                _partition_node(h) for h in response.get("arbiters", [])])
+        self.cx = self.motor_client(ssl=self.ssl)
+        self.db = self.cx.motor_test
+        self.collection = self.db.test_collection
 
-            repl_set_status = self.sync_cx.admin.command('replSetGetStatus')
-            primary_info = [
-                m for m in repl_set_status['members']
-                if m['stateStr'] == 'PRIMARY'][0]
+    @gen.coroutine
+    def make_test_data(self):
+        yield self.collection.remove()
+        yield self.collection.insert([{'_id': i} for i in range(200)])
 
-            self.primary = _partition_node(primary_info['name'])
-            self.secondaries = [
-                _partition_node(m['name']) for m in repl_set_status['members']
-                if m['stateStr'] == 'SECONDARY']
-            
-        self.sync_db = self.sync_cx.pymongo_test
-        self.sync_coll = self.sync_db.test_collection
-        self.sync_coll.drop()
-
-        # Make some test data
-        self.sync_coll.ensure_index([('s', pymongo.ASCENDING)], unique=True)
-        self.sync_coll.insert(
-            [{'_id': i, 's': hex(i)} for i in range(200)])
-
-        self.cx = self.motor_client_sync()
+    make_test_data.__test__ = False
 
     @gen.coroutine
     def wait_for_cursor(self, collection, cursor_id, retrieved):
         """Ensure a cursor opened during the test is closed on the
         server, e.g. after dereferencing an open cursor on the client:
 
-            collection = self.cx.pymongo_test.test_collection
+            collection = self.cx.motor_test.test_collection
             cursor = collection.find()
 
             # Open it server-side
@@ -142,7 +190,7 @@ class MotorTest(PauseMixin, testing.AsyncTestCase):
         start = time.time()
         collection_name = collection.name
         db_name = collection.database.name
-        sync_collection = self.sync_cx[db_name][collection_name]
+        sync_collection = sync_cx[db_name][collection_name]
         while True:
             sync_cursor = sync_collection.find()
             sync_cursor._Cursor__id = cursor_id
@@ -155,7 +203,7 @@ class MotorTest(PauseMixin, testing.AsyncTestCase):
                 # not a test bug. mongod reports "cursor id 'N' not valid at
                 # server", mongos says:
                 # "database error: could not find cursor in cache for id N
-                # over collection pymongo_test.test_collection".
+                # over collection motor_test.test_collection".
                 self.assertTrue(
                     "not valid at server" in e.args[0] or
                     "could not find cursor in cache" in e.args[0])
@@ -173,32 +221,18 @@ class MotorTest(PauseMixin, testing.AsyncTestCase):
                 # Let the loop run, might be working on closing the cursor
                 yield self.pause(0.1)
 
-    @gen.coroutine
     def motor_client(self, host=host, port=port, *args, **kwargs):
-        """Get an open MotorClient. Ignores self.ssl, you must pass 'ssl'
-        argument. You'll probably need to close the client to avoid
-        file-descriptor problems after AsyncTestCase calls
-        self.io_loop.close(all_fds=True).
+        """Get a MotorClient.
+
+        Ignores self.ssl, you must pass 'ssl' argument. You'll probably need to
+        close the client to avoid file-descriptor problems after AsyncTestCase
+        calls self.io_loop.close(all_fds=True).
         """
-        client = motor.MotorClient(
+        return motor.MotorClient(
             host, port, *args, io_loop=self.io_loop, **kwargs)
 
-        yield client.open()
-        raise gen.Return(client)
-
-    def motor_client_sync(self, host=host, port=port, *args, **kwargs):
-        """Get an open MotorClient. Ignores self.ssl, you must pass 'ssl'
-        argument.
-        """
-        assert not self.io_loop._running, (
-            "Don't call motor_client_sync from within gen_test,"
-            " yield self.motor_client() instead")
-
-        return self.io_loop.run_sync(functools.partial(
-            self.motor_client, host, port, *args, **kwargs))
-
     @gen.coroutine
-    def check_callback_handling(self, fn, required):
+    def check_optional_callback(self, fn, *args, **kwargs):
         """Take a function and verify that it accepts a 'callback' parameter
         and properly type-checks it. If 'required', check that fn requires
         a callback.
@@ -211,33 +245,20 @@ class MotorTest(PauseMixin, testing.AsyncTestCase):
           - `required`: Whether `fn` should require a callback or not
           - `callback`: To be called with ``(None, error)`` when done
         """
-        self.assertRaises(TypeError, fn, callback='foo')
-        self.assertRaises(TypeError, fn, callback=1)
-
-        if required:
-            self.assertRaises(TypeError, fn)
-            self.assertRaises(TypeError, fn, None)
-        else:
-            # Should not raise
-            fn(callback=None)
+        partial_fn = functools.partial(fn, *args, **kwargs)
+        self.assertRaises(TypeError, partial_fn, callback='foo')
+        self.assertRaises(TypeError, partial_fn, callback=1)
 
         # Should not raise
-        (result, error), _ = yield gen.Task(fn)
+        yield partial_fn(callback=None)
+
+        # Should not raise
+        (result, error), _ = yield gen.Task(partial_fn)
         if error:
             raise error
 
-    @gen.coroutine
-    def check_required_callback(self, fn, *args, **kwargs):
-        yield self.check_callback_handling(
-            functools.partial(fn, *args, **kwargs), True)
-
-    @gen.coroutine
-    def check_optional_callback(self, fn, *args, **kwargs):
-        yield self.check_callback_handling(
-            functools.partial(fn, *args, **kwargs), False)
-
     def tearDown(self):
-        self.sync_coll.drop()
+        sync_collection.remove()
         self.cx.close()
         super(MotorTest, self).tearDown()
 
@@ -245,7 +266,7 @@ class MotorTest(PauseMixin, testing.AsyncTestCase):
 class MotorReplicaSetTestBase(MotorTest):
     def setUp(self):
         super(MotorReplicaSetTestBase, self).setUp()
-        if not self.is_replica_set:
+        if not is_replica_set:
             raise SkipTest("Not connected to a replica set")
 
         self.rsc = self.motor_rsc_sync()
@@ -259,9 +280,8 @@ class MotorReplicaSetTestBase(MotorTest):
         """
         client = motor.MotorReplicaSetClient(
             '%s:%s' % (host, port), *args, io_loop=self.io_loop,
-            replicaSet=self.name, **kwargs)
+            replicaSet=rs_name, **kwargs)
 
-        yield client.open()
         raise gen.Return(client)
 
     def motor_rsc_sync(self, host=host, port=port, *args, **kwargs):
@@ -272,5 +292,4 @@ class MotorReplicaSetTestBase(MotorTest):
             self.motor_rsc, host, port, *args, **kwargs))
 
     def tearDown(self):
-        self.rsc.close()
         super(MotorReplicaSetTestBase, self).tearDown()

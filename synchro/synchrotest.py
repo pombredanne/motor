@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -47,13 +47,18 @@ excluded_modules = [
     'test.test_paired',
     'test.test_master_slave_connection',
     'test.test_legacy_connections',
+
+    # Complex PyMongo-specific mocking.
+    'test.test_replica_set_reconfig',
+    'test.test_mongos_ha',
 ]
 
 excluded_tests = [
-    # Synchro can't simulate requests, so test copy_db in Motor directly.
+    # Depends on requests.
     '*.test_copy_db',
+    'TestCollection.test_insert_large_batch',
 
-    # use_greenlets is always True with Motor.
+    # Motor always uses greenlets.
     '*.test_use_greenlets',
 
     # Motor's reprs aren't the same as PyMongo's.
@@ -63,6 +68,22 @@ excluded_tests = [
     # slave_okay in Synchro.
     'TestClient.test_from_uri',
     'TestReplicaSetClient.test_properties',
+
+    # MotorClient(uri).open() doesn't raise ConfigurationError if the URI has
+    # the wrong auth credentials.
+    'TestClient.test_auth_from_uri',
+
+    # Motor's pool is different, we test it separately.
+    '*.test_waitQueueMultiple',
+
+    # Lazy-connection tests require multithreading; we test concurrent
+    # lazy connection directly.
+    '_TestLazyConnectMixin.*',
+    'TestClientLazyConnect.*',
+    'TestClientLazyConnectOneGoodSeed.*',
+    'TestClientLazyConnectBadSeeds.*',
+    'TestReplicaSetClientLazyConnect.*',
+    'TestReplicaSetClientLazyConnectBadSeeds.*',
 
     # Motor doesn't do requests.
     '*.test_auto_start_request',
@@ -76,10 +97,18 @@ excluded_tests = [
 
     # We test this directly, because it requires monkey-patching either socket
     # or IOStream, depending on whether it's PyMongo or Motor.
-    'TestReplicaSetClient.test_auto_reconnect_exception_when_read_preference_is_secondary',
+    ('TestReplicaSetClient.'
+     'test_auto_reconnect_exception_when_read_preference_is_secondary'),
 
     # No pinning in Motor since there are no requests.
     'TestReplicaSetClient.test_pinned_member',
+
+    # Not allowed to call schedule_refresh directly in Motor.
+    'TestReplicaSetClient.test_schedule_refresh',
+
+    # We don't make the same guarantee as PyMongo when connecting an
+    # RS client to a standalone.
+    'TestReplicaSetClientAgainstStandalone.test_connect',
 
     # test_read_preference: requires patching MongoReplicaSetClient specially.
     'TestCommandAndReadPreference.*',
@@ -91,6 +120,9 @@ excluded_tests = [
     'TestGridfs.test_threaded_writes',
     'TestGridfs.test_threaded_reads',
 
+    # Relies on threads; tested directly.
+    'TestCollection.test_parallel_scan',
+
     # Motor doesn't support PyMongo's syntax, db.system_js['my_func'] = "code",
     # users should just use system.js as a regular collection.
     'TestDatabase.test_system_js',
@@ -100,8 +132,8 @@ excluded_tests = [
     # just gets no results.
     'TestCursor.test_getitem_index_out_of_range',
 
-    # Motor's tailing works differently.
-    'TestCursor.test_tailable',
+    # Weird use-case.
+    'TestCursor.test_cursor_transfer',
 
     # No context-manager protocol for MotorCursor.
     'TestCursor.test_with_statement',
@@ -110,6 +142,9 @@ excluded_tests = [
     'TestGridfs.test_missing_length_iter',
     'TestGridFile.test_iterator',
 
+    # Not worth simulating a user calling GridOutCursor(args).
+    'TestGridFile.test_grid_out_cursor_options',
+
     # Don't need to check that GridFile is deprecated.
     'TestGridFile.test_grid_file',
 
@@ -117,6 +152,18 @@ excluded_tests = [
     'TestGridFile.test_context_manager',
     'TestGridFile.test_grid_in_default_opts',
     'TestGridFile.test_set_after_close',
+
+    # GridFS always connects lazily in Motor.
+    'TestGridfs.test_gridfs_lazy_connect',
+
+    # Testing a deprecated PyMongo API, Motor can skip it.
+    'TestCollection.test_insert_message_creation',
+
+    # Complex PyMongo-specific mocking.
+    'TestMongoClientFailover.*',
+    'TestReplicaSetClientInternalIPs.*',
+    'TestClient.test_wire_version_mongos_ha',
+    '*.test_wire_version',
 ]
 
 
@@ -172,16 +219,21 @@ pymongo_modules = set([
     'pymongo.collection',
     'pymongo.common',
     'pymongo.connection',
+    'pymongo.command_cursor',
     'pymongo.cursor',
+    'pymongo.cursor_manager',
     'pymongo.database',
+    'pymongo.helpers',
     'pymongo.errors',
     'pymongo.master_slave_connection',
+    'pymongo.member',
     'pymongo.mongo_client',
     'pymongo.mongo_replica_set_client',
     'pymongo.pool',
     'pymongo.read_preferences',
     'pymongo.replica_set_connection',
     'pymongo.son_manipulator',
+    'pymongo.ssl_match_hostname',
     'pymongo.thread_util',
     'pymongo.uri_parser',
 ])

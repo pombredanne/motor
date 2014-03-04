@@ -14,7 +14,7 @@ Motor Tutorial
   import tornado.web
   from tornado.ioloop import IOLoop
   from tornado import gen
-  db = motor.MotorClient().open_sync().test_database
+  db = motor.MotorClient().test_database
 
 .. testsetup:: after-inserting-2000-docs
 
@@ -23,7 +23,7 @@ Motor Tutorial
   import tornado.web
   from tornado.ioloop import IOLoop
   from tornado import gen
-  db = motor.MotorClient().open_sync().test_database
+  db = motor.MotorClient().test_database
   pymongo.MongoClient().test_database.test_collection.insert(
       [{'i': i} for i in range(2000)])
 
@@ -87,23 +87,22 @@ or :class:`~motor.MotorReplicaSetClient` at the time your application starts
 up. (See `high availability and PyMongo`_ for an introduction to
 MongoDB replica sets and how PyMongo connects to them.)
 
-You must call :meth:`~motor.MotorClient.open_sync` on this client object
-before any other operations on it:
-
 .. doctest:: before-inserting-2000-docs
 
-  >>> client = motor.MotorClient().open_sync()
+  >>> client = motor.MotorClient()
 
 This connects to a ``mongod`` listening on the default host and port. You can
 specify the host and port like:
 
 .. doctest:: before-inserting-2000-docs
 
-  >>> client = motor.MotorClient('localhost', 27017).open_sync()
+  >>> client = motor.MotorClient('localhost', 27017)
 
 Motor also supports `connection URIs`_::
 
-  >>> client = motor.MotorClient('mongodb://localhost:27017').open_sync()
+.. doctest:: before-inserting-2000-docs
+
+  >>> client = motor.MotorClient('mongodb://localhost:27017')
 
 .. _high availability and PyMongo: http://api.mongodb.org/python/current/examples/high_availability.html
 
@@ -127,13 +126,9 @@ or return a Future.
 Tornado Application Startup Sequence
 ------------------------------------
 Now that we can create a client and get a database, we're ready to start
-a Tornado application that uses Motor.
+a Tornado application that uses Motor::
 
-:meth:`~motor.MotorClient.open_sync` is a blocking operation so it should
-be called before listening for HTTP requests. Here's an example startup
-sequence for a Tornado web application::
-
-    db = motor.MotorClient().open_sync().test_database
+    db = motor.MotorClient().test_database
 
     application = tornado.web.Application([
         (r'/', MainHandler)
@@ -142,39 +137,20 @@ sequence for a Tornado web application::
     application.listen(8888)
     tornado.ioloop.IOLoop.instance().start()
 
-Passing the database as the ``db`` keyword argument to ``Application`` makes it
-available to request handlers::
+There are two things to note in this code. First, the ``MotorClient``
+constructor doesn't actually connect to the server; the client will
+initiate a connection when you attempt the first operation.
+Second, passing the database as the ``db`` keyword argument to ``Application``
+makes it available to request handlers::
 
     class MainHandler(tornado.web.RequestHandler):
         def get(self):
             db = self.settings['db']
 
-If you want to use the Tornado HTTP server's `start() method`_ to fork
-multiple subprocesses, you must create the client object **after** calling
-``start()``, since a client created before forking isn't valid after::
-
-    application = tornado.web.Application([
-        (r'/', MainHandler)
-    ])
-
-    server = tornado.httpserver.HTTPServer(application)
-    server.bind(8888)
-
-    # start(0) starts a subprocess for each CPU core
-    server.start(0)
-
-    db = motor.MotorClient().open_sync().test_database
-
-    # Delayed initialization of settings
-    application.settings['db'] = db
-    tornado.ioloop.IOLoop.instance().start()
-
 .. warning:: It is a common mistake to create a new client object for every
   request; this comes at a dire performance cost. Create the client
   when your application starts and reuse that one client for the lifetime
   of the process, as shown in these examples.
-
-.. _start() method: http://tornadoweb.org/en/stable/netutil.html#tornado.netutil.TCPServer.start
 
 Getting a Collection
 --------------------
@@ -247,7 +223,7 @@ unique id:
   >>> db.test_collection.insert(document, callback=my_callback)
   >>> IOLoop.instance().start()
   result 1 error None
-  result None error DuplicateKeyError(u'E11000 duplicate key error index: test_database.test_collection.$_id_  dup key: { : 1 }',)
+  result None error DuplicateKeyError(...)
 
 The first insert results in ``my_callback`` being called with result 1 and
 error ``None``. The second insert triggers ``my_callback`` with result None and
@@ -263,7 +239,7 @@ not waiting for each insert to complete before beginning the next::
 
 In PyMongo this would insert each document in turn using a single socket, but
 Motor attempts to run all the :meth:`insert` operations at once. This requires
-up to ``max_concurrent`` [#max_concurrent]_ open sockets connected to MongoDB,
+up to ``max_pool_size`` open sockets connected to MongoDB,
 which taxes the client and server. To ensure instead that all inserts use a
 single connection, wait for acknowledgment of each. This is a bit complex using
 callbacks:
@@ -289,9 +265,10 @@ You can simplify this code with ``gen.coroutine``.
 
 Using Motor with `gen.coroutine`
 --------------------------------
-The `tornado.gen module`_ lets you use generators to simplify asynchronous
-code. There are two parts to coding with ``gen``: ``gen.coroutine`` and
-``Future``.
+The :mod:`tornado.gen` module lets you use generators to simplify asynchronous
+code. There are two parts to coding with generators:
+:func:`coroutine <tornado.gen.coroutine>` and
+:class:`~tornado.concurrent.Future`.
 
 First, decorate your generator function with ``@gen.coroutine``:
 
@@ -315,11 +292,9 @@ and obtain its result:
 
 In the code above, ``result`` is the ``_id`` of each inserted document.
 
-.. seealso:: `Bulk inserts in PyMongo <http://api.mongodb.org/python/current/tutorial.html?highlight=bulk%20inserts#bulk-inserts>`_
+.. seealso:: :doc:`examples/bulk`.
 
 .. seealso:: :ref:`Detailed example of Motor and gen.coroutine <coroutine-example>`
-
-.. _tornado.gen module: http://tornadoweb.org/en/stable/gen.html
 
 .. mongodoc:: insert
 
@@ -583,6 +558,3 @@ Learning to use the MongoDB driver is just the beginning, of course. For
 in-depth instruction in MongoDB itself, see `The MongoDB Manual`_.
 
 .. _The MongoDB Manual: http://docs.mongodb.org/manual/
-
-.. [#max_concurrent] ``max_concurrent`` is set when creating a
-  :class:`~motor.MotorClient` or :class:`~motor.MotorReplicaSetClient`.

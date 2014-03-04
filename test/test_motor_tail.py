@@ -1,4 +1,4 @@
-# Copyright 2012 10gen, Inc.
+# Copyright 2012-2014 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,19 +20,20 @@ import unittest
 
 from tornado.testing import gen_test
 
+import test
 from test import MotorTest
 
 
 class MotorTailTest(MotorTest):
     def setUp(self):
         super(MotorTailTest, self).setUp()
-        self.sync_db.capped.drop()
+        test.sync_db.capped.drop()
         # autoIndexId catches test bugs that try to insert duplicate _id's
-        self.sync_db.create_collection(
+        test.sync_db.create_collection(
             'capped', capped=True, size=1000, autoIndexId=True)
 
-        self.sync_db.uncapped.drop()
-        self.sync_db.uncapped.insert({})
+        test.sync_db.uncapped.drop()
+        test.sync_db.uncapped.insert({})
 
     def start_insertion_thread(self, pauses):
         """A thread that gradually inserts documents into a capped collection
@@ -41,7 +42,7 @@ class MotorTailTest(MotorTest):
             i = 0
             for pause in pauses:
                 time.sleep(pause)
-                self.sync_db.capped.insert({'_id': i})
+                test.sync_db.capped.insert({'_id': i})
                 i += 1
 
         t = threading.Thread(target=add_docs)
@@ -57,7 +58,7 @@ class MotorTailTest(MotorTest):
     def test_tail(self):
         expected = [{'_id': i} for i in range(len(self.tail_pauses))]
         t = self.start_insertion_thread(self.tail_pauses)
-        capped = self.cx.pymongo_test.capped
+        capped = self.db.capped
         results = []
         time = self.io_loop.time
         start = time()
